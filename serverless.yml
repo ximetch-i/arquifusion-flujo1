@@ -1,0 +1,290 @@
+service: arquifusion-flujo1
+
+frameworkVersion: "3"
+
+plugins:
+  - serverless-step-functions
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  timeout: 30
+  memorySize: 256
+  environment:
+    SNS_TOPIC_ARN:
+      Ref: TemaLecturas
+    SQS_QUEUE_URL:
+      Ref: ColaLecturas
+    S3_BUCKET:
+      Ref: HistorialLecturas
+    TABLA_MAQUINAS: t_maquinas-${sls:stage}
+    TABLA_RESULTADOS: t_resultados-${sls:stage}
+    TABLA_MANTENIMIENTO: t_mantenimiento-${sls:stage}
+    STATE_MACHINE_ARN:
+      Fn::Sub: "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:FlujoAnalisisMaquina-${sls:stage}"
+    TEMA_INCIDENTES_ARN:
+      Ref: TemaIncidentes
+    GCP_API_URL: ${env:GCP_API_URL, ''}
+    GCP_API_KEY_PARAMETER: /hackathon/gcp-key
+    AI_MODE: ${env:AI_MODE, 'MOCK'}
+    UMBRAL_PREVENTIVO: ${env:UMBRAL_PREVENTIVO, '0.50'}
+    UMBRAL_URGENTE: ${env:UMBRAL_URGENTE, '0.80'}
+    RADIO_CAUSA_COMUN_KM: ${env:RADIO_CAUSA_COMUN_KM, '5'}
+    VENTANA_MINUTOS: '10'
+
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - sns:Publish
+          Resource:
+            - Ref: TemaLecturas
+            - Ref: TemaIncidentes
+
+        - Effect: Allow
+          Action:
+            - sqs:ReceiveMessage
+            - sqs:DeleteMessage
+            - sqs:GetQueueAttributes
+            - sqs:ChangeMessageVisibility
+          Resource:
+            Fn::GetAtt: [ColaLecturas, Arn]
+
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:ListBucket
+          Resource:
+            - Fn::GetAtt: [HistorialLecturas, Arn]
+            - Fn::Sub: "${HistorialLecturas.Arn}/*"
+
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:Query
+            - dynamodb:Scan
+          Resource:
+            - Fn::GetAtt: [TablaMaquinas, Arn]
+            - Fn::GetAtt: [TablaResultados, Arn]
+            - Fn::GetAtt: [TablaMantenimiento, Arn]
+
+        - Effect: Allow
+          Action:
+            - states:StartExecution
+          Resource:
+            Fn::Sub: "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:FlujoAnalisisMaquina-${sls:stage}"
+
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/hackathon/gcp-key"
+
+functions:
+  GenerarLecturaMaquina:
+    handler: GenerarLecturaMaquina.lambda_handler
+    timeout: 30
+    events:
+      - schedule:
+          rate: rate(1 minute)
+          enabled: true
+
+  IngestarLectura:
+    handler: IngestarLectura.lambda_handler
+    timeout: 30
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt: [ColaLecturas, Arn]
+          batchSize: 1
+          functionResponseType: ReportBatchItemFailures
+
+  PrepararVentana:
+    handler: PrepararVentana.lambda_handler
+    timeout: 60
+    memorySize: 512
+
+  ClasificarMaquina:
+    handler: ClasificarMaquina.lambda_handler
+    timeout: 30
+
+  RevisarMantenimientoPreventivo:
+    handler: RevisarMantenimientoPreventivo.lambda_handler
+    timeout: 60
+    events:
+      - schedule:
+          # 13:00 UTC = 08:00 en Perú
+          rate: cron(0 13 * * ? *)
+          enabled: true
+
+stepFunctions:
+  stateMachines:
+    FlujoAnalisisMaquina:
+      name: FlujoAnalisisMaquina-${sls:stage}
+      definition:
+        Comment: "Analisis de telemetria para prevencion de fallas"
+        StartAt: PrepararVentana
+        States:
+          PrepararVentana:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [PrepararVentanaLambdaFunction, Arn]
+            Retry:
+              - ErrorEquals:
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2
+            Next: ClasificarMaquina
+          ClasificarMaquina:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [ClasificarMaquinaLambdaFunction, Arn]
+            Retry:
+              - ErrorEquals:
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2
+            End: true
+
+resources:
+  Resources:
+    TemaLecturas:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: TemaLecturas-${sls:stage}
+
+    ColaLecturas:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ColaLecturas-${sls:stage}
+        VisibilityTimeout: 180
+        RedrivePolicy:
+          deadLetterTargetArn:
+            Fn::GetAtt: [ColaLecturasDLQ, Arn]
+          maxReceiveCount: 3
+
+    ColaLecturasDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ColaLecturasDLQ-${sls:stage}
+        MessageRetentionPeriod: 1209600
+
+    PoliticaColaLecturas:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - Ref: ColaLecturas
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: sns.amazonaws.com
+              Action: sqs:SendMessage
+              Resource:
+                Fn::GetAtt: [ColaLecturas, Arn]
+              Condition:
+                ArnEquals:
+                  aws:SourceArn:
+                    Ref: TemaLecturas
+
+    SuscripcionTemaLecturas:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn:
+          Ref: TemaLecturas
+        Protocol: sqs
+        Endpoint:
+          Fn::GetAtt: [ColaLecturas, Arn]
+        RawMessageDelivery: true
+
+    HistorialLecturas:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: arquifusion-historial-${sls:stage}-${aws:accountId}
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          IgnorePublicAcls: true
+          BlockPublicPolicy: true
+          RestrictPublicBuckets: true
+
+    TablaMaquinas:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: t_maquinas-${sls:stage}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: machine_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: machine_id
+            KeyType: HASH
+
+    TablaResultados:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: t_resultados-${sls:stage}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: machine_id
+            AttributeType: S
+          - AttributeName: timestamp
+            AttributeType: S
+        KeySchema:
+          - AttributeName: machine_id
+            KeyType: HASH
+          - AttributeName: timestamp
+            KeyType: RANGE
+
+    TablaMantenimiento:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: t_mantenimiento-${sls:stage}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: machine_id
+            AttributeType: S
+          - AttributeName: fecha
+            AttributeType: S
+        KeySchema:
+          - AttributeName: machine_id
+            KeyType: HASH
+          - AttributeName: fecha
+            KeyType: RANGE
+
+    TemaIncidentes:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: TemaIncidentes-${sls:stage}
+
+  Outputs:
+    TemaLecturasArn:
+      Value:
+        Ref: TemaLecturas
+    ColaLecturasUrl:
+      Value:
+        Ref: ColaLecturas
+    ColaLecturasDLQArn:
+      Value:
+        Fn::GetAtt: [ColaLecturasDLQ, Arn]
+    HistorialLecturasBucket:
+      Value:
+        Ref: HistorialLecturas
+    FlujoAnalisisMaquinaArn:
+      Value:
+        Ref: FlujoAnalisisMaquina
+    TemaIncidentesArn:
+      Value:
+        Ref: TemaIncidentes
