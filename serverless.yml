@@ -1,3 +1,4 @@
+
 service: arquifusion-flujo1
 
 frameworkVersion: "3"
@@ -12,6 +13,11 @@ provider:
   stage: ${opt:stage, 'dev'}
   timeout: 30
   memorySize: 256
+
+  # AWS Academy: reutilizar el rol existente
+  iam:
+    role: arn:aws:iam::783278466061:role/LabRole
+
   environment:
     SNS_TOPIC_ARN:
       Ref: TemaLecturas
@@ -19,74 +25,28 @@ provider:
       Ref: ColaLecturas
     S3_BUCKET:
       Ref: HistorialLecturas
+
     TABLA_MAQUINAS: t_maquinas-${sls:stage}
     TABLA_RESULTADOS: t_resultados-${sls:stage}
     TABLA_MANTENIMIENTO: t_mantenimiento-${sls:stage}
+
     STATE_MACHINE_ARN:
-      Fn::Sub: "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:FlujoAnalisisMaquina-${sls:stage}"
+      Fn::Sub: arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:FlujoAnalisisMaquina-${sls:stage}
+
     TEMA_INCIDENTES_ARN:
       Ref: TemaIncidentes
+
     GCP_API_URL: ${env:GCP_API_URL, ''}
     GCP_API_KEY_PARAMETER: /hackathon/gcp-key
     AI_MODE: ${env:AI_MODE, 'MOCK'}
+
     UMBRAL_PREVENTIVO: ${env:UMBRAL_PREVENTIVO, '0.50'}
     UMBRAL_URGENTE: ${env:UMBRAL_URGENTE, '0.80'}
     RADIO_CAUSA_COMUN_KM: ${env:RADIO_CAUSA_COMUN_KM, '5'}
     VENTANA_MINUTOS: '10'
 
-  iam:
-    role:
-      statements:
-        - Effect: Allow
-          Action:
-            - sns:Publish
-          Resource:
-            - Ref: TemaLecturas
-            - Ref: TemaIncidentes
-
-        - Effect: Allow
-          Action:
-            - sqs:ReceiveMessage
-            - sqs:DeleteMessage
-            - sqs:GetQueueAttributes
-            - sqs:ChangeMessageVisibility
-          Resource:
-            Fn::GetAtt: [ColaLecturas, Arn]
-
-        - Effect: Allow
-          Action:
-            - s3:PutObject
-            - s3:GetObject
-            - s3:ListBucket
-          Resource:
-            - Fn::GetAtt: [HistorialLecturas, Arn]
-            - Fn::Sub: "${HistorialLecturas.Arn}/*"
-
-        - Effect: Allow
-          Action:
-            - dynamodb:GetItem
-            - dynamodb:PutItem
-            - dynamodb:UpdateItem
-            - dynamodb:Query
-            - dynamodb:Scan
-          Resource:
-            - Fn::GetAtt: [TablaMaquinas, Arn]
-            - Fn::GetAtt: [TablaResultados, Arn]
-            - Fn::GetAtt: [TablaMantenimiento, Arn]
-
-        - Effect: Allow
-          Action:
-            - states:StartExecution
-          Resource:
-            Fn::Sub: "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:FlujoAnalisisMaquina-${sls:stage}"
-
-        - Effect: Allow
-          Action:
-            - ssm:GetParameter
-          Resource:
-            Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/hackathon/gcp-key"
-
 functions:
+
   GenerarLecturaMaquina:
     handler: GenerarLecturaMaquina.lambda_handler
     timeout: 30
@@ -101,7 +61,9 @@ functions:
     events:
       - sqs:
           arn:
-            Fn::GetAtt: [ColaLecturas, Arn]
+            Fn::GetAtt:
+              - ColaLecturas
+              - Arn
           batchSize: 1
           functionResponseType: ReportBatchItemFailures
 
@@ -119,7 +81,7 @@ functions:
     timeout: 60
     events:
       - schedule:
-          # 13:00 UTC = 08:00 en Perú
+          # 13:00 UTC = 08:00 Peru
           rate: cron(0 13 * * ? *)
           enabled: true
 
@@ -127,14 +89,23 @@ stepFunctions:
   stateMachines:
     FlujoAnalisisMaquina:
       name: FlujoAnalisisMaquina-${sls:stage}
+
+      # Reutilizar LabRole para Step Functions
+      role: arn:aws:iam::783278466061:role/LabRole
+
       definition:
         Comment: "Analisis de telemetria para prevencion de fallas"
         StartAt: PrepararVentana
+
         States:
+
           PrepararVentana:
             Type: Task
             Resource:
-              Fn::GetAtt: [PrepararVentanaLambdaFunction, Arn]
+              Fn::GetAtt:
+                - PrepararVentanaLambdaFunction
+                - Arn
+
             Retry:
               - ErrorEquals:
                   - Lambda.ServiceException
@@ -143,11 +114,16 @@ stepFunctions:
                 IntervalSeconds: 2
                 MaxAttempts: 3
                 BackoffRate: 2
+
             Next: ClasificarMaquina
+
           ClasificarMaquina:
             Type: Task
             Resource:
-              Fn::GetAtt: [ClasificarMaquinaLambdaFunction, Arn]
+              Fn::GetAtt:
+                - ClasificarMaquinaLambdaFunction
+                - Arn
+
             Retry:
               - ErrorEquals:
                   - Lambda.ServiceException
@@ -156,15 +132,20 @@ stepFunctions:
                 IntervalSeconds: 2
                 MaxAttempts: 3
                 BackoffRate: 2
+
             End: true
 
 resources:
+
   Resources:
+
+    # SNS: lecturas de sensores
     TemaLecturas:
       Type: AWS::SNS::Topic
       Properties:
         TopicName: TemaLecturas-${sls:stage}
 
+    # SQS: cola principal
     ColaLecturas:
       Type: AWS::SQS::Queue
       Properties:
@@ -172,116 +153,151 @@ resources:
         VisibilityTimeout: 180
         RedrivePolicy:
           deadLetterTargetArn:
-            Fn::GetAtt: [ColaLecturasDLQ, Arn]
+            Fn::GetAtt:
+              - ColaLecturasDLQ
+              - Arn
           maxReceiveCount: 3
 
+    # SQS: Dead Letter Queue
     ColaLecturasDLQ:
       Type: AWS::SQS::Queue
       Properties:
         QueueName: ColaLecturasDLQ-${sls:stage}
         MessageRetentionPeriod: 1209600
 
+    # Permitir que SNS envíe mensajes a SQS
     PoliticaColaLecturas:
       Type: AWS::SQS::QueuePolicy
       Properties:
         Queues:
           - Ref: ColaLecturas
+
         PolicyDocument:
           Version: "2012-10-17"
+
           Statement:
             - Effect: Allow
               Principal:
                 Service: sns.amazonaws.com
               Action: sqs:SendMessage
+
               Resource:
-                Fn::GetAtt: [ColaLecturas, Arn]
+                Fn::GetAtt:
+                  - ColaLecturas
+                  - Arn
+
               Condition:
                 ArnEquals:
                   aws:SourceArn:
                     Ref: TemaLecturas
 
+    # Suscripción SNS -> SQS
     SuscripcionTemaLecturas:
       Type: AWS::SNS::Subscription
       Properties:
         TopicArn:
           Ref: TemaLecturas
+
         Protocol: sqs
+
         Endpoint:
-          Fn::GetAtt: [ColaLecturas, Arn]
+          Fn::GetAtt:
+            - ColaLecturas
+            - Arn
+
         RawMessageDelivery: true
 
+    # S3: historial de lecturas
     HistorialLecturas:
       Type: AWS::S3::Bucket
       Properties:
         BucketName: arquifusion-historial-${sls:stage}-${aws:accountId}
+
         PublicAccessBlockConfiguration:
           BlockPublicAcls: true
           IgnorePublicAcls: true
           BlockPublicPolicy: true
           RestrictPublicBuckets: true
 
+    # DynamoDB: estado actual de máquinas
     TablaMaquinas:
       Type: AWS::DynamoDB::Table
       Properties:
         TableName: t_maquinas-${sls:stage}
         BillingMode: PAY_PER_REQUEST
+
         AttributeDefinitions:
           - AttributeName: machine_id
             AttributeType: S
+
         KeySchema:
           - AttributeName: machine_id
             KeyType: HASH
 
+    # DynamoDB: resultados de análisis
     TablaResultados:
       Type: AWS::DynamoDB::Table
       Properties:
         TableName: t_resultados-${sls:stage}
         BillingMode: PAY_PER_REQUEST
+
         AttributeDefinitions:
           - AttributeName: machine_id
             AttributeType: S
           - AttributeName: timestamp
             AttributeType: S
+
         KeySchema:
           - AttributeName: machine_id
             KeyType: HASH
           - AttributeName: timestamp
             KeyType: RANGE
 
+    # DynamoDB: historial de mantenimiento
     TablaMantenimiento:
       Type: AWS::DynamoDB::Table
       Properties:
         TableName: t_mantenimiento-${sls:stage}
         BillingMode: PAY_PER_REQUEST
+
         AttributeDefinitions:
           - AttributeName: machine_id
             AttributeType: S
           - AttributeName: fecha
             AttributeType: S
+
         KeySchema:
           - AttributeName: machine_id
             KeyType: HASH
           - AttributeName: fecha
             KeyType: RANGE
 
+    # SNS: incidentes urgentes
     TemaIncidentes:
       Type: AWS::SNS::Topic
       Properties:
         TopicName: TemaIncidentes-${sls:stage}
 
   Outputs:
+
     TemaLecturasArn:
       Value:
         Ref: TemaLecturas
+
     ColaLecturasUrl:
       Value:
         Ref: ColaLecturas
+
     ColaLecturasDLQArn:
       Value:
-        Fn::GetAtt: [ColaLecturasDLQ, Arn]
+        Fn::GetAtt:
+          - ColaLecturasDLQ
+          - Arn
+
     HistorialLecturasBucket:
       Value:
         Ref: HistorialLecturas
+
     TemaIncidentesArn:
       Value:
         Ref: TemaIncidentes
