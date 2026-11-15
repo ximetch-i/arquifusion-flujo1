@@ -1,3 +1,4 @@
+import json
 import math
 import os
 from decimal import Decimal
@@ -73,15 +74,19 @@ def lambda_handler(event, context):
     TABLA_RESULTADOS.put_item(Item=resultado)
 
     if severidad == "URGENTE":
+        incidente = {
+            "machine_id": machine_id,
+            "severidad": "urgente",
+            "lat": lat,
+            "lon": lon,
+            "prob_falla": prob
+        }
+
         sns.publish(
             TopicArn=TEMA_INCIDENTES_ARN,
             Subject=f"Incidente urgente: {machine_id}",
-            Message=(
-                f"machine_id={machine_id}; severidad=URGENTE; "
-                f"prob_falla={prob}; lat={lat}; lon={lon}; "
-                f"maquinas_cercanas={cercanas}"
-            )
-        )
+            Message=json.dumps(incidente)
+        )    
 
     return {
         "machine_id": machine_id,
