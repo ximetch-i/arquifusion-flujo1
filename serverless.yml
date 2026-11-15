@@ -16,7 +16,7 @@ provider:
 
   # AWS Academy: reutilizar el rol existente
   iam:
-    role: arn:aws:iam::783278466061:role/LabRole
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
 
   environment:
     SNS_TOPIC_ARN:
