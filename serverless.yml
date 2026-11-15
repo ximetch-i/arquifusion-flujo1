@@ -91,7 +91,7 @@ stepFunctions:
       name: FlujoAnalisisMaquina-${sls:stage}
 
       # Reutilizar LabRole para Step Functions
-      role: arn:aws:iam::783278466061:role/LabRole
+      role: arn:aws:iam::${aws:accountId}:role/LabRole
 
       definition:
         Comment: "Analisis de telemetria para prevencion de fallas"
