@@ -47,16 +47,8 @@ provider:
 
 functions:
 
-  GenerarLecturaMaquina:
-    handler: GenerarLecturaMaquina.lambda_handler
-    timeout: 30
-    events:
-      - schedule:
-          rate: rate(1 minute)
-          enabled: true
-
-  IngestarLectura:
-    handler: IngestarLectura.lambda_handler
+  IngestarLote:
+    handler: IngestarLote.lambda_handler
     timeout: 30
     events:
       - sqs:
@@ -65,6 +57,7 @@ functions:
               - ColaLecturas
               - Arn
           batchSize: 1
+          maximumConcurrency: 2   # minimo permitido por AWS; evita picos de Lambdas simultaneas
           functionResponseType: ReportBatchItemFailures
 
   PrepararVentana:
@@ -94,45 +87,63 @@ stepFunctions:
       role: arn:aws:iam::${aws:accountId}:role/LabRole
 
       definition:
-        Comment: "Analisis de telemetria para prevencion de fallas"
-        StartAt: PrepararVentana
+        Comment: "Analisis de telemetria por lote (una ejecucion por ciclo)"
+        StartAt: AnalizarLote
 
         States:
 
-          PrepararVentana:
-            Type: Task
-            Resource:
-              Fn::GetAtt:
-                - PrepararVentanaLambdaFunction
-                - Arn
+          AnalizarLote:
+            Type: Map
+            ItemsPath: $.maquinas
+            MaxConcurrency: 5   # nunca mas de 5 maquinas analizandose a la vez
+            Iterator:
+              StartAt: PrepararVentana
+              States:
 
-            Retry:
-              - ErrorEquals:
-                  - Lambda.ServiceException
-                  - Lambda.AWSLambdaException
-                  - Lambda.SdkClientException
-                IntervalSeconds: 2
-                MaxAttempts: 3
-                BackoffRate: 2
+                PrepararVentana:
+                  Type: Task
+                  Resource:
+                    Fn::GetAtt:
+                      - PrepararVentanaLambdaFunction
+                      - Arn
+                  Retry:
+                    - ErrorEquals:
+                        - Lambda.ServiceException
+                        - Lambda.AWSLambdaException
+                        - Lambda.SdkClientException
+                      IntervalSeconds: 2
+                      MaxAttempts: 3
+                      BackoffRate: 2
+                  Catch:
+                    - ErrorEquals:
+                        - States.ALL
+                      Next: MaquinaOmitida
+                  Next: ClasificarMaquina
 
-            Next: ClasificarMaquina
+                ClasificarMaquina:
+                  Type: Task
+                  Resource:
+                    Fn::GetAtt:
+                      - ClasificarMaquinaLambdaFunction
+                      - Arn
+                  Retry:
+                    - ErrorEquals:
+                        - Lambda.ServiceException
+                        - Lambda.AWSLambdaException
+                        - Lambda.SdkClientException
+                      IntervalSeconds: 2
+                      MaxAttempts: 3
+                      BackoffRate: 2
+                  Catch:
+                    - ErrorEquals:
+                        - States.ALL
+                      Next: MaquinaOmitida
+                  End: true
 
-          ClasificarMaquina:
-            Type: Task
-            Resource:
-              Fn::GetAtt:
-                - ClasificarMaquinaLambdaFunction
-                - Arn
-
-            Retry:
-              - ErrorEquals:
-                  - Lambda.ServiceException
-                  - Lambda.AWSLambdaException
-                  - Lambda.SdkClientException
-                IntervalSeconds: 2
-                MaxAttempts: 3
-                BackoffRate: 2
-
+                # Si una maquina falla, las demas del lote siguen.
+                MaquinaOmitida:
+                  Type: Pass
+                  End: true
             End: true
 
 resources:

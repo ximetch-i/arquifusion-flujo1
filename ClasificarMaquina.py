@@ -1,9 +1,11 @@
 import json
 import math
 import os
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 import boto3
+from boto3.dynamodb.conditions import Attr
 
 dynamodb = boto3.resource("dynamodb")
 sns = boto3.client("sns")
@@ -14,6 +16,7 @@ TEMA_INCIDENTES_ARN = os.environ["TEMA_INCIDENTES_ARN"]
 UMBRAL_PREVENTIVO = float(os.environ.get("UMBRAL_PREVENTIVO", "0.50"))
 UMBRAL_URGENTE = float(os.environ.get("UMBRAL_URGENTE", "0.80"))
 RADIO_CAUSA_COMUN_KM = float(os.environ.get("RADIO_CAUSA_COMUN_KM", "5"))
+MINUTOS_CAUSA_COMUN = int(os.environ.get("MINUTOS_CAUSA_COMUN", "15"))
 
 def distancia_km(lat1, lon1, lat2, lon2):
     radio_tierra = 6371
@@ -23,21 +26,31 @@ def distancia_km(lat1, lon1, lat2, lon2):
     a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     return 2 * radio_tierra * math.asin(math.sqrt(a))
 
-def buscar_maquinas_cercanas(lat, lon, machine_id):
-    """Busca resultados recientes cercanos para señalar posible causa compartida."""
-    respuesta = TABLA_RESULTADOS.scan()
-    cercanas = []
+def buscar_maquinas_cercanas(lat, lon, machine_id, timestamp):
+    """Busca alertas RECIENTES cercanas para señalar posible causa compartida.
 
-    for item in respuesta.get("Items", []):
-        if item.get("machine_id") == machine_id:
-            continue
-        if "lat" not in item or "lon" not in item:
-            continue
-        distancia = distancia_km(
-            lat, lon, float(item["lat"]), float(item["lon"])
-        )
-        if distancia <= RADIO_CAUSA_COMUN_KM and item.get("severidad") in ("PREVENTIVO", "URGENTE"):
-            cercanas.append(item["machine_id"])
+    Solo se consideran resultados de los últimos MINUTOS_CAUSA_COMUN minutos
+    (si no, alertas viejas contarían como "causa común") y se pagina el Scan.
+    """
+    instante = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    desde = (instante - timedelta(minutes=MINUTOS_CAUSA_COMUN)).isoformat(timespec="seconds")
+    filtro = Attr("timestamp").gte(desde) & Attr("severidad").is_in(["PREVENTIVO", "URGENTE"])
+
+    kwargs = {"FilterExpression": filtro}
+    cercanas = []
+    while True:
+        respuesta = TABLA_RESULTADOS.scan(**kwargs)
+        for item in respuesta.get("Items", []):
+            if item.get("machine_id") == machine_id:
+                continue
+            if "lat" not in item or "lon" not in item:
+                continue
+            distancia = distancia_km(lat, lon, float(item["lat"]), float(item["lon"]))
+            if distancia <= RADIO_CAUSA_COMUN_KM:
+                cercanas.append(item["machine_id"])
+        if "LastEvaluatedKey" not in respuesta:
+            break
+        kwargs["ExclusiveStartKey"] = respuesta["LastEvaluatedKey"]
 
     return sorted(set(cercanas))
 
@@ -57,7 +70,7 @@ def lambda_handler(event, context):
     lat = float(event["lat"])
     lon = float(event["lon"])
 
-    cercanas = buscar_maquinas_cercanas(lat, lon, machine_id)
+    cercanas = buscar_maquinas_cercanas(lat, lon, machine_id, timestamp)
     resultado = {
         "machine_id": machine_id,
         "timestamp": timestamp,

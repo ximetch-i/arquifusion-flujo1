@@ -1,6 +1,7 @@
 import json
 import os
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import boto3
 import urllib.request
@@ -16,16 +17,23 @@ AI_MODE = os.environ.get("AI_MODE", "MOCK").upper()
 VENTANA_MINUTOS = int(os.environ.get("VENTANA_MINUTOS", "10"))
 
 def leer_lecturas_recientes(machine_id, instante):
-    """Lee de S3 las lecturas de la máquina dentro de la ventana temporal."""
+    """Lee de S3 solo las lecturas de la ventana temporal.
+
+    Las claves llevan el timestamp ISO, que ordena igual que el tiempo, así que
+    StartAfter evita listar y descargar todo el historial del día en cada análisis.
+    """
     inicio = instante - timedelta(minutes=VENTANA_MINUTOS)
+    desde = inicio - timedelta(seconds=1)  # StartAfter es exclusivo
     lecturas = []
+    mid = quote(machine_id, safe="")
 
     # Se revisan la fecha actual y la anterior para cubrir ventanas que cruzan medianoche.
-    for fecha in {instante.date(), inicio.date()}:
-        prefijo = f"lecturas/machine_id={machine_id}/fecha={fecha.isoformat()}/"
+    for fecha in sorted({instante.date(), inicio.date()}):
+        prefijo = f"lecturas/machine_id={mid}/fecha={fecha.isoformat()}/"
+        inicio_clave = prefijo + quote(desde.isoformat(timespec="seconds"), safe="")
         paginator = s3.get_paginator("list_objects_v2")
 
-        for pagina in paginator.paginate(Bucket=BUCKET, Prefix=prefijo):
+        for pagina in paginator.paginate(Bucket=BUCKET, Prefix=prefijo, StartAfter=inicio_clave):
             for objeto in pagina.get("Contents", []):
                 contenido = s3.get_object(Bucket=BUCKET, Key=objeto["Key"])["Body"].read()
                 lectura = json.loads(contenido)
