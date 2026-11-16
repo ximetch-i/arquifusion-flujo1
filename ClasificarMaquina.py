@@ -11,6 +11,7 @@ dynamodb = boto3.resource("dynamodb")
 sns = boto3.client("sns")
 
 TABLA_RESULTADOS = dynamodb.Table(os.environ["TABLA_RESULTADOS"])
+TABLA_MAQUINAS = dynamodb.Table(os.environ["TABLA_MAQUINAS"])
 TEMA_INCIDENTES_ARN = os.environ["TEMA_INCIDENTES_ARN"]
 
 UMBRAL_PREVENTIVO = float(os.environ.get("UMBRAL_PREVENTIVO", "0.50"))
@@ -25,6 +26,14 @@ def distancia_km(lat1, lon1, lat2, lon2):
     dl = math.radians(lon2 - lon1)
     a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     return 2 * radio_tierra * math.asin(math.sqrt(a))
+
+def obtener_zona(machine_id):
+    """La zona no viene en la lectura del sensor: se consulta en t_maquinas."""
+    item = TABLA_MAQUINAS.get_item(
+        Key={"machine_id": machine_id}, ProjectionExpression="zona"
+    ).get("Item", {})
+    return item.get("zona")
+
 
 def buscar_maquinas_cercanas(lat, lon, machine_id, timestamp):
     """Busca alertas RECIENTES cercanas para señalar posible causa compartida.
@@ -90,10 +99,13 @@ def lambda_handler(event, context):
         incidente = {
             "machine_id": machine_id,
             "severidad": "urgente",
+            "zona": obtener_zona(machine_id),
             "lat": lat,
             "lon": lon,
             "prob_falla": prob
         }
+        if not incidente["zona"]:
+            print(f"AVISO: {machine_id} no tiene zona en t_maquinas; el Flujo 2 rechazará el incidente.")
 
         sns.publish(
             TopicArn=TEMA_INCIDENTES_ARN,

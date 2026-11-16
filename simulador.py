@@ -8,7 +8,7 @@ La ingesta (S3 + DynamoDB + Step Functions) la hace la Lambda IngestarLote.
 Variables de entorno:
   SNS_TOPIC_ARN        (obligatoria) ARN de TemaLecturas-<stage>
   TABLA_MAQUINAS       (opcional)    t_maquinas-dev; se usa solo para retomar el estado al reiniciar
-  NUM_MAQUINAS         (opcional)    30
+  NUM_MAQUINAS         (opcional)    30 (lo lee flota.py)
   INTERVALO_SEGUNDOS   (opcional)    60
   AWS_REGION           (opcional)    us-east-1
 """
@@ -21,47 +21,19 @@ from datetime import datetime, timezone
 
 import boto3
 
+from flota import construir_flota
+
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 TOPIC_ARN = os.environ["SNS_TOPIC_ARN"]
 TABLA_MAQUINAS = os.environ.get("TABLA_MAQUINAS", "t_maquinas-dev")
-NUM_MAQUINAS = int(os.environ.get("NUM_MAQUINAS", "30"))
 INTERVALO = int(os.environ.get("INTERVALO_SEGUNDOS", "60"))
 
 sns = boto3.client("sns", region_name=REGION)
 dynamodb = boto3.resource("dynamodb", region_name=REGION)
 
-# Las 3 máquinas de demostración originales, más las que falten hasta NUM_MAQUINAS.
-# Sustituyan coordenadas y valores base por los del caso real.
-BASE = [
-    {"machine_id": "MAQ-001", "lat": -12.0464, "lon": -77.0428, "temperatura": 75.0, "vibracion": 3.0,
-     "presion": 150.0, "rpm": 1600, "combustible": 12.0, "carga": 8.0, "velocidad": 15.0},
-    {"machine_id": "MAQ-002", "lat": -12.0550, "lon": -77.0300, "temperatura": 80.0, "vibracion": 4.0,
-     "presion": 160.0, "rpm": 1800, "combustible": 15.0, "carga": 10.0, "velocidad": 18.0},
-    {"machine_id": "MAQ-003", "lat": -12.0350, "lon": -77.0500, "temperatura": 70.0, "vibracion": 2.5,
-     "presion": 145.0, "rpm": 1500, "combustible": 10.0, "carga": 6.0, "velocidad": 12.0},
-]
 CAMPOS_NUMERICOS = ["temperatura", "vibracion", "presion", "rpm", "combustible", "carga", "velocidad"]
 AMPLITUD = {"temperatura": 1.5, "vibracion": 0.3, "presion": 2.0, "rpm": 50,
             "combustible": 0.5, "carga": 0.5, "velocidad": 1.0}
-
-
-def construir_flota():
-    rng = random.Random(42)  # semilla fija: la flota es la misma en cada arranque
-    flota = [dict(m) for m in BASE[:NUM_MAQUINAS]]
-    for i in range(len(flota) + 1, NUM_MAQUINAS + 1):
-        flota.append({
-            "machine_id": f"MAQ-{i:03d}",
-            "lat": round(-12.0464 + rng.uniform(-0.06, 0.06), 4),
-            "lon": round(-77.0428 + rng.uniform(-0.06, 0.06), 4),
-            "temperatura": round(rng.uniform(68, 82), 1),
-            "vibracion": round(rng.uniform(2.2, 4.2), 2),
-            "presion": round(rng.uniform(140, 165), 1),
-            "rpm": rng.randint(1450, 1850),
-            "combustible": round(rng.uniform(9, 16), 1),
-            "carga": round(rng.uniform(5, 11), 1),
-            "velocidad": round(rng.uniform(11, 19), 1),
-        })
-    return flota
 
 
 def cargar_estado_previo(flota):

@@ -48,6 +48,27 @@ def guardar_en_s3(lectura):
     )
 
 
+def guardar_estado_maquinas(lecturas):
+    """Actualiza SOLO los campos de la lectura en t_maquinas.
+
+    update_item (no put_item): así no se borran zona, repuesto_requerido, operador_email...
+    que cargan otros flujos. "estado" no se copia: lo gestiona el Flujo 2.
+    """
+    for lectura in lecturas:
+        campos = {
+            k: (Decimal(str(v)) if isinstance(v, (int, float)) and not isinstance(v, bool) else v)
+            for k, v in lectura.items() if k not in ("machine_id", "estado")
+        }
+        nombres = {f"#c{i}": k for i, k in enumerate(campos)}
+        valores = {f":v{i}": v for i, v in enumerate(campos.values())}
+        TABLA_MAQUINAS.update_item(
+            Key={"machine_id": lectura["machine_id"]},
+            UpdateExpression="SET " + ", ".join(f"#c{i} = :v{i}" for i in range(len(campos))),
+            ExpressionAttributeNames=nombres,
+            ExpressionAttributeValues=valores,
+        )
+
+
 def procesar_lote(lote):
     """Valida, guarda y lanza UNA ejecución de Step Functions para todo el lote."""
     lecturas = lote["lecturas"] if isinstance(lote, dict) else lote
@@ -66,13 +87,7 @@ def procesar_lote(lote):
     for lectura in validas:
         guardar_en_s3(lectura)
 
-    # Estado más reciente de cada máquina (escritura en lote).
-    with TABLA_MAQUINAS.batch_writer(overwrite_by_pkeys=["machine_id"]) as escritor:
-        for lectura in validas:
-            escritor.put_item(Item={
-                k: Decimal(str(v)) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
-                for k, v in lectura.items()
-            })
+    guardar_estado_maquinas(validas)
 
     lote_id = (lote.get("lote_id") if isinstance(lote, dict) else None) or validas[0]["timestamp"]
     nombre = re.sub(r"[^A-Za-z0-9_-]", "-", f"lote-{lote_id}")[:80]
